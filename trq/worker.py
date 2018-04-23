@@ -17,8 +17,9 @@ _reserved_task_handler_functions = ['initialize']
 
 class Worker:
 
-    def __init__(self, handlers, *, queue_name=None, connection=None):
+    def __init__(self, handlers, *, queue_name=None, connection=None, max_tasks=0):
         self._connection = connection
+        self._max_tasks = max_tasks
 
         config = get_global_config()
         self.task_prefix = config['task']['prefix']
@@ -127,13 +128,17 @@ class Worker:
 
         while not self._shutdown:
             try:
-                with (await self.connection) as con:
-                    task_id = await con.brpoplpush(
-                        self._pending_queue_key, self._processing_queue_key,
-                        timeout=1)
-                if task_id and not self._shutdown:
-                    task_id = task_id.decode('utf-8')
-                    self._running_tasks[task_id] = asyncio.get_event_loop().create_task(self._run_task(task_id))
+                # limit the number of tasks possible
+                if self._max_tasks and len(self._running_tasks) >= self._max_tasks:
+                    await asyncio.wait(self._running_tasks.values(), timeout=1)
+                else:
+                    with (await self.connection) as con:
+                        task_id = await con.brpoplpush(
+                            self._pending_queue_key, self._processing_queue_key,
+                            timeout=1)
+                    if task_id and not self._shutdown:
+                        task_id = task_id.decode('utf-8')
+                        self._running_tasks[task_id] = asyncio.get_event_loop().create_task(self._run_task(task_id))
             except REDIS_CONNECTION_ERRORS as e:
                 await asyncio.sleep(REDIS_CONNECTION_ERROR_RETRY_DELAY)
             except asyncio.CancelledError:
